@@ -1,4 +1,4 @@
-﻿from gym.utils import seeding
+from gym.utils import seeding
 
 
 class BaseEnv(object):

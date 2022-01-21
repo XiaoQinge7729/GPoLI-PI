@@ -10,7 +10,6 @@ from itertools import count
 import matplotlib.pyplot as plt
 import pygmo as pg
 
-import pybullet_envs
 import gym
 import numpy as np
 
@@ -38,7 +37,7 @@ import sys
 #~ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 from amoorl import make_env_mosrl2 as make_env
 
-#~ torch.set_num_threads(1)
+torch.set_num_threads(1)
 
 use_cuda = torch.cuda.is_available()
 use_cuda = False
@@ -663,7 +662,7 @@ def main():
     log_grads = 1
     log_interval = 10
     
-    #~ num_envs = 32
+    #~ num_envs = 48
     num_envs = 24
     #~ num_envs = 20
     #~ num_envs = 16
@@ -808,7 +807,7 @@ def main():
     gail_traj_num = 50
     gail_traj_len = 5
     gail_traj_freq = 1
-    gail_experts_trajs, gail_traj_num = "case1_full.pt", 318
+    gail_experts_trajs, gail_traj_num = "case1_full_ndf_525.pt", 525
     
     gail_model = None
     #~ gail_model = "trained_models/20210928_072012/EP_2500_-8_0_d.pt"
