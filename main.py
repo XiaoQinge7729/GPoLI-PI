@@ -35,7 +35,7 @@ from multiprocessing_env import SubprocVecEnv
 from torch.utils.tensorboard import SummaryWriter
 
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+#~ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 from amoorl import make_env_mosrl2 as make_env
 
 #~ torch.set_num_threads(1)
@@ -57,15 +57,12 @@ def render_moo(pop, hv=0):
     pop = np.asarray(pop)
     indices = pg.non_dominated_front_2d(pop[:, :2])
     ndf = pop[indices]
-    #~ pg.plot_non_dominated_fronts(pop[:, :2], axes=ax)
     ax.plot(pop[:, 0], pop[:, 1], 'bo')
     ax.plot(ndf[:, 0], ndf[:, 1], 'ms')
     ax.grid('on')
     plt.title('hv {:.3f}, pop {}, ndf {}, {:.0f}%'.format(hv, len(pop), len(ndf), 100*len(ndf)/len(pop)))
     plt.xlabel('SEC')
     plt.ylabel('Tp(s)')
-    #~ plt.xlim(14, 20)
-    #~ plt.ylim(400, 570)
     return fig
 
 def set_seed(seed):
@@ -77,7 +74,6 @@ def make_env_gym(env_name, seed, rank):
     def _thunk():
         env = gym.make(env_name)
         env.seed(seed + rank)
-        #~ env = bench.Monitor(env, filename=None, allow_early_resets=False)
         return env
     return _thunk
 
@@ -773,7 +769,7 @@ def main():
     #~ use_gail = 4        # rnn encoder mode
     #~ use_gail = 5        # triplet_loss
     #~ use_gail = 6        # rnd
-    #~ use_gail = 7        # energy traj, work nice
+    #~ use_gail = 7        # energy traj
     
     gail_moo_hack = 0       # replace sec
     #~ gail_moo_hack = 1       # replace tp
@@ -947,7 +943,6 @@ def main():
             rnn_encoder = gail.RnnEncoder(num_inputs, output_size, rnn_enc_size, lr=rnn_enc_lr).to(device)
         
         if use_gail==6:
-            #~ gail_shape = num_inputs, output_size
             gail_shape = num_inputs*gail_traj_len, output_size*gail_traj_len
             discr = gail.RND_Critic(*gail_shape, device)
             discr.load(os.path.join(gail_experts_dir, rnd_model))
@@ -1017,8 +1012,6 @@ def main():
     frame_idx    = 0
     test_rewards = []
     
-    #~ episode_rewards = torch.zeros([num_envs, 1]).to(device)
-    #~ final_rewards = torch.zeros([num_envs, 1]).to(device)
     episode_rewards = deque(maxlen=num_envs)
 
     best_z = SortedDict()
@@ -1070,12 +1063,10 @@ def main():
         # generation end
         # rollout trajectory
         state = envs.reset()
-        #~ for steps in range(num_steps):
         for steps in count(0):
             state = torch.FloatTensor(state).to(device)
             
             # generation begin
-            #~ z = model.generate(valid_z=valid_z if valid_mode else None)
             if mask_w is not None:
                 z = model.generate_ep(valid_z=valid_z if valid_mode else None, mask=mask_w)
                 if rand_orth_reg:
@@ -1368,7 +1359,6 @@ def main():
             elif use_gail==20:
                 gail_rws_ep = []
                 gail_rewards = torch.zeros(num_envs, steps+1)
-                #~ gail_rewards = torch.full((num_envs, steps+1), -1.0)
                 rollouts_pred = torch.utils.data.DataLoader(
                                     dataset=rollout_dataset,
                                     batch_size=1,
@@ -1387,7 +1377,6 @@ def main():
             elif use_gail==7:
                 gail_rws_ep = []
                 gail_rewards = torch.zeros(num_envs, steps+1)
-                #~ gail_rewards = torch.full((num_envs, steps+1), -1.0)
                 rollouts_pred = torch.utils.data.DataLoader(
                                     dataset=rollout_dataset,
                                     batch_size=1,
@@ -1415,7 +1404,6 @@ def main():
             elif use_gail==6:
                 gail_rws_ep = []
                 gail_rewards = torch.zeros(num_envs, steps+1)
-                #~ gail_rewards = torch.full((num_envs, steps+1), -1.0)
                 rollouts_pred = torch.utils.data.DataLoader(
                                     dataset=rollout_dataset,
                                     batch_size=1,
@@ -1457,10 +1445,6 @@ def main():
         # hv begin
         if len(gail_moo_pop)>1 and moo_mode and use_gail:
             hv = pg.hypervolume(gail_moo_pop)
-            #~ ref_p = [1, 51, 1]              # DeepseaEnergy
-            #~ ref_p = [1, 51]              # DeapSea
-            #~ ref_p = [41, 1001]              # Moo
-            #~ ref_p = hv.refpoint(offset=0.1)
             if gail_moo_hack==0:
                 ref_p = [11, 1001]      # [41, 1001]
                 hv_scale = 1e-3
@@ -1469,14 +1453,7 @@ def main():
                 hv_scale = 1e-2
             hv_c = hv.contributions(ref_p)
             hv_s = hv.compute(ref_p)
-            #~ episode_rewards.append(hv_s)
-            # hack reward begin
             rewards = torch.stack(rewards)
-            #~ if norm_hv:
-                #~ hv_c = (hv_c - hv_c.mean())/(hv_c.std()+1e-8)
-            #~ else:
-                #~ hv_c *= scale_hv
-            #~ rewards.view(-1, 1)[hv_reward_idx] += torch.FloatTensor(hv_c).unsqueeze(1).to(device)
             ndf_ = (torch.FloatTensor(hv_c)>0)
             hv_ = ndf_.float() * hv_s * hv_scale    # 1e-2
             rewards.view(-1, 1)[hv_reward_idx] += hv_.unsqueeze(1).to(device)
@@ -1503,44 +1480,21 @@ def main():
         # hv end
         
         # hv begin
-        #~ rewards = torch.stack(rewards)
         if len(moo_pop)>1 and ((moo_mode and ref_p is not None and not use_gail) or (not moo_mode and valid_mode)):
             hv = pg.hypervolume(moo_pop)
-            #~ ref_p = [1, 51, 1]              # DeepseaEnergy
-            #~ ref_p = [1, 51]              # DeapSea
-            #~ ref_p = [41, 1001]              # Moo
-            #~ ref_p = hv.refpoint(offset=0.1)
             hv_c = hv.contributions(ref_p)
             hv_s = hv.compute(ref_p)
             # hack reward begin
             rewards = torch.stack(rewards)
-            #~ if norm_hv:
-                #~ hv_c = (hv_c - hv_c.mean())/(hv_c.std()+1e-8)
-            #~ else:
-                #~ hv_c *= scale_hv
-            #~ hv_c *= 0.01    # DeapSea
-            #~ hv_c *= 0.001    # DeepseaEnergy
-            #~ rewards.view(-1, 1)[hv_reward_idx] = torch.FloatTensor(hv_c).unsqueeze(1).to(device)
-            #~ rewards.view(-1, 1)[hv_reward_idx] += torch.FloatTensor(hv_c).unsqueeze(1).to(device)
-            #~ ndf_ = (torch.FloatTensor(hv_c)>0).float().unsqueeze(1).to(device)
             ndf_ = (torch.FloatTensor(hv_c)>0)
-            #~ zeros_ = (~ndf_).float() * -1
-            #~ zeros_ = (~ndf_).float() * -1.5         # 1.2 1.3 1.5
-            #~ hv_ = zeros_ + ndf_.float() * hv_s * 1e-3
             hv_ = ndf_.float() * hv_s * 1e-3
-            #~ print(rewards.view(-1, 1)[hv_reward_idx].shape, hv_.unsqueeze(1).shape, len(hv_reward_idx), len(moo_pop))
             if moo_mode:
                 rewards.view(-1, 1)[hv_reward_idx] += hv_.unsqueeze(1).to(device)
-            #~ rewards = rewards.unbind()
             # hack reward end
             if not valid_mode:
                 writer.add_scalar(tsbx_id+'_mo/hv', hv_s, j)
-                #~ writer.add_scalars(tsbx_id+'_mo/ihv', {'mean':np.mean(hv_c), 
-                                        #~ 'min':np.min(hv_c), 'max':np.max(hv_c)}, j)
             else:
                 writer.add_scalar(tsbx_id+'_mo/hv_valid', hv_s, j)
-                #~ writer.add_scalars(tsbx_id+'_mo/ihv_valid', {'mean':np.mean(hv_c), 
-                                        #~ 'min':np.min(hv_c), 'max':np.max(hv_c)}, j)
             
             if len(moo_pop)>1:
                 t_plot = time.time()
@@ -1644,7 +1598,6 @@ def main():
         if j%25==0 and log_grads:
             for name, param in model.named_parameters():
                 name = name.split('.')
-                #~ name = '.'.join(name[:-1]) + '/' + name[-1]
                 name = '.'.join(name[:1]) + '/' + '.'.join(name[1:])
                 writer.add_histogram(tsbx_id+'model.%s'%name, param.data.detach().cpu().numpy(), j)
                 writer.add_histogram(tsbx_id+'model.%s.grads'%name, param.grad.detach().cpu().numpy(), j)
@@ -1680,7 +1633,6 @@ def main():
         
         total_num_steps = (j + 1) * num_envs * num_steps
         
-        #~ if j%save_interval==0 and j>0:
         if (j<100 and j%2==0) \
                 or ((100<=j<=600 or 1000<=j<=1200 or 1500<=j<=1700 or 2000<=j<=2200) and j%5==0) \
                 or j%save_interval==0:
@@ -1703,12 +1655,6 @@ def main():
         writer.add_scalars(tsbx_id+'_train/reward', {'mean':np.mean(episode_rewards), 
                                 'min':np.min(episode_rewards), 'max':np.max(episode_rewards)}, j)
         
-        #~ if log_debug:
-            #~ writer.add_scalar(tsbx_id+'model/gloss', gloss.item(), total_num_steps)
-            #~ writer.add_scalar(tsbx_id+'debug/log_probs', log_probs.detach().mean(), total_num_steps)
-            #~ writer.add_scalar(tsbx_id+'debug/advantage', advantage.detach().mean(), total_num_steps)
-            #~ writer.add_scalar(tsbx_id+'debug/values', values.detach().mean(), total_num_steps)
-            #~ writer.add_scalar(tsbx_id+'debug/returns', returns.mean(), total_num_steps)
         writer.add_scalar(tsbx_id+'model/actor_loss', actor_loss.item(), j)
         writer.add_scalar(tsbx_id+'model/critic_loss', critic_loss.item(), j)
         writer.add_scalar(tsbx_id+'_train/entropy', entropy.item(), j)
@@ -1722,12 +1668,8 @@ def main():
             writer.add_scalars(tsbx_id+'_train/lr', get_lr_layer_rotation(optimizer), j)
         if j%10==0 and hasattr(model, 'get_layer_rotation'):
             writer.add_scalars(tsbx_id+'_train/layer_rotation', model.get_layer_rotation(), j)
-        #~ if j%100==0:
-            #~ writer.add_histogram(tsbx_id+'generated model', model.vis(), j)
-            #~ writer.add_image(tsbx_id+'Generated model', model.vis(), j)
-            #~ writer.add_image(tsbx_id+'Generated model', make_grid(model.vis()[:20], nrow=4, normalize=True), j)
+        
         t_log = time.time() - t_log
-        #~ print(f"t_log time: {t_log*1000:.0f} ms")
         if nan_check:
             break
 
