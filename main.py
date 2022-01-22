@@ -681,6 +681,7 @@ def main():
     ep_max = 100        # train normal
     #~ ep_max = 120        # train
     ep_max = 144        # train traj
+    ep_max = 480        # train traj
     
     moo_mode = 0
     #~ moo_mode = 1
@@ -807,16 +808,14 @@ def main():
     gail_traj_num = 50
     gail_traj_len = 5
     gail_traj_freq = 1
-    gail_experts_trajs, gail_traj_num = "case1_full_ndf_525.pt", 525
+    gail_experts_trajs, gail_traj_num = "expert_trajectories_500.pt", 500
     
     gail_model = None
     #~ gail_model = "trained_models/20210928_072012/EP_2500_-8_0_d.pt"
     
     gail_model2 = None
-    #~ gail_model = "trained_models/20210219_183043/EP_3000_-10_0_d.pt"
     
-    rnd_model = 'rnd_case1_full.pt'
-    #~ rnd_model = 'rnd_case1_sec.pt'
+    rnd_model = None
     
     GM = 1
     #~ GM = 0
