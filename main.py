@@ -32,12 +32,15 @@ from envs import VecNormalize
 from multiprocessing_env import SubprocVecEnv
 
 from torch.utils.tensorboard import SummaryWriter
+from arguments import get_args
 
 import sys
 #~ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 from amoorl import make_env_mosrl2 as make_env
 
-torch.set_num_threads(1)
+#~ torch.set_num_threads(1)
+
+args = get_args()
 
 use_cuda = torch.cuda.is_available()
 use_cuda = False
@@ -56,12 +59,15 @@ def render_moo(pop, hv=0):
     pop = np.asarray(pop)
     indices = pg.non_dominated_front_2d(pop[:, :2])
     ndf = pop[indices]
+    #~ pg.plot_non_dominated_fronts(pop[:, :2], axes=ax)
     ax.plot(pop[:, 0], pop[:, 1], 'bo')
     ax.plot(ndf[:, 0], ndf[:, 1], 'ms')
     ax.grid('on')
     plt.title('hv {:.3f}, pop {}, ndf {}, {:.0f}%'.format(hv, len(pop), len(ndf), 100*len(ndf)/len(pop)))
     plt.xlabel('SEC')
     plt.ylabel('Tp(s)')
+    #~ plt.xlim(14, 20)
+    #~ plt.ylim(400, 570)
     return fig
 
 def set_seed(seed):
@@ -73,6 +79,7 @@ def make_env_gym(env_name, seed, rank):
     def _thunk():
         env = gym.make(env_name)
         env.seed(seed + rank)
+        #~ env = bench.Monitor(env, filename=None, allow_early_resets=False)
         return env
     return _thunk
 
@@ -121,10 +128,13 @@ def init(module, weight_init, bias_init, gain=1):
         bias_init(module.bias.data)
     return module
 
-
 class sActor(nn.Module):
     def __init__(self, input_size, output_size, hidden_size=16, z_dim=8):
         super().__init__()
+        
+        #~ ly1 = (input_size+1), (hidden_size+1)
+        #~ ly2 = (hidden_size+2), hidden_size
+        #~ ly3 = (hidden_size+1), output_size
         
         ly1 = (input_size+1), hidden_size
         ly2 = (hidden_size+1), hidden_size
@@ -153,6 +163,7 @@ class sActor(nn.Module):
         
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
+#             lambda x: nn.init.uniform_(x, 0, 1),
             lambda x: nn.init.constant_(x, 0),
             np.sqrt(2))
         
@@ -256,9 +267,12 @@ class ActorCritic(nn.Module):
         self.quaBits = self.quaBits if self.quaMode else 1
         
         self.use_critic = use_critic
-        if use_critic:
+        if use_critic==1:
             self.critic = Critic0(input_size, hidden_size)
-        #~ self.actor = Actor0(input_size, output_size, hidden_size)
+        elif use_critic==2:
+            self.critic = Critic0(input_size+1+z_size, hidden_size)
+            #~ self.critic = Critic0(input_size+z_size, hidden_size)
+            #~ self.critic = Critic0(input_size+1, hidden_size)
         
         self.actor = sActor(input_size, output_size, hidden_size, z_size)
     
@@ -266,14 +280,18 @@ class ActorCritic(nn.Module):
         save_path = os.path.join("trained_models", time.strftime('%Y%m%d_%H%M%S', time.localtime(t_start)))
         os.makedirs(save_path, exist_ok=True)
         model_name = f"EP_{j}_{reward:.0f}_{reward1:.0f}"
-        torch.save({"model":self.state_dict(), "ob_rms":ob_rms, "opt_state":opt_state}, 
+        torch.save({"actor":self.actor.state_dict(), 
+                            "critic":self.critic.state_dict(), 
+                            "ob_rms":ob_rms, "opt_state":opt_state}, 
                             os.path.join(save_path, model_name + ".pt"))
 
     def load(self, path, ob_only=False):
         data = torch.load(path)
         if ob_only:
             return data.get('ob_rms'), None
-        self.load_state_dict(data["model"])
+        self.actor.load_state_dict(data["actor"])
+        if self.use_critic==1:
+            self.critic.load_state_dict(data["critic"])
         return data.get('ob_rms'), data.get('opt_state')
     
     def vis(self):
@@ -301,7 +319,7 @@ class ActorCritic(nn.Module):
             z = torch.randn(self.quaBits, self.z_size).to(device)
         else:
             z = valid_z.expand(self.quaBits, self.z_size).to(device)
-        self.actor.generate(z)
+        z = self.actor.generate(z)
         #~ z = torch.randn(self.quaBits, self.z_size).to(device)
         #~ self.critic.generate(z)
         return z
@@ -311,9 +329,22 @@ class ActorCritic(nn.Module):
             z = torch.randn(self.quaBits, self.z_size).to(device)
         else:
             z = valid_z.expand(self.quaBits, self.z_size).to(device)
-        self.actor.generate_ep(z, mask=mask)
+        z = self.actor.generate_ep(z, mask=mask)
         return z
     
+    def generate_ppo(self, z=None):
+        if z is None:
+            z = torch.randn(self.quaBits, self.z_size).to(device)
+        self.actor.generate(z)
+    
+    def generate_ep_ppo(self, z=None, mask=None):
+        if z is None:
+            z = torch.randn(self.quaBits, self.z_size).to(device)
+        self.actor.generate_ep(z, mask=mask)
+    
+    def z_clone(self):
+        return self.actor.z.clone()
+
     def get_theta(self, i=0):
         return self.actor.get_theta(i)
     
@@ -333,6 +364,18 @@ class ActorCritic(nn.Module):
     def forward(self, state):
         mean = self.actor(state)
         return mean
+    
+    def sample_ppo(self, state, deterministic=False, limit_std=None):
+        with torch.no_grad():
+            return self.sample(state, deterministic, limit_std)
+    
+    def sample_ppo2(self, state, deterministic=False, limit_std=None):
+        with torch.no_grad():
+            value = torch.zeros(state.size(0), 1)
+            if self.continuous:
+                return self.sample_cont(state, deterministic, limit_std=limit_std) + (value,)
+            else:
+                return self.sample_disc(state, deterministic) + (value,)
     
     def sample(self, state, deterministic=False, limit_std=None):
         value = self.critic(state) if self.use_critic else torch.zeros(state.size(0), 1)
@@ -359,22 +402,47 @@ class ActorCritic(nn.Module):
         log_prob = dist.log_prob(action)
         return action, log_prob, dist.entropy()
     
+    def eval_ppo(self, states, actions, limit_std=None, z=None):
+        value = self.critic(states) if self.use_critic else torch.zeros(states.size(0), 1)
+        log_prob = self.eval_grad(states, actions, limit_std, z)
+        return log_prob, value
+
     def eval(self, states, actions, limit_std=None):
         """ batch_size = quaBits ! """
         with torch.no_grad():
             return self.eval_grad(states, actions, limit_std)
     
-    def eval_grad(self, states, actions, limit_std=None):
+    def eval_grad(self, states, actions, limit_std=None, z=None):
         a_log_p = []
         for i in range(states.size(0)//self.quaBits):
             state = states[i*self.quaBits:self.quaBits*(i+1)]
             action = actions[i*self.quaBits:self.quaBits*(i+1)]
-            self.generate()
+            if z is None:
+                self.generate()
+            else:
+                z_batch = z[i*self.quaBits:self.quaBits*(i+1)]
+                self.generate_ppo(z_batch)
             if self.continuous:
                 a_log_p.append(self.eval_cont(state, action, limit_std=limit_std))
             else:
                 a_log_p.append(self.eval_disc(state, action))
         return torch.cat(a_log_p)
+    
+    def eval_ppo2(self, state, action, limit_std=None):
+        value = self.critic(state) if self.use_critic else torch.zeros(state.size(0), 1)
+        if self.continuous:
+            return self.eval_cont(state, action, limit_std=limit_std), value
+        else:
+            return self.eval_disc(state, action), value
+    
+    def eval_ppo2_cd(self, state, action, z, cd, limit_std=None):
+        value = self.critic(torch.cat([state, z, cd], dim=1)) if self.use_critic else torch.zeros(state.size(0), 1)
+        #~ value = self.critic(torch.cat([state, z], dim=1)) if self.use_critic else torch.zeros(state.size(0), 1)
+        #~ value = self.critic(torch.cat([state, cd], dim=1)) if self.use_critic else torch.zeros(state.size(0), 1)
+        if self.continuous:
+            return self.eval_cont(state, action, limit_std=limit_std), value
+        else:
+            return self.eval_disc(state, action), value
     
     def eval_cont(self, state, action, limit_std=None):
         mean = self.forward(state)
@@ -462,6 +530,7 @@ class Actor0(nn.Module):
             log_std = torch.clamp(log_std, min=self.log_std_min, max=self.log_std_max)
         return mean, log_std.exp()
 
+
 class ActorCritic0(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size, 
                                 log_std_max=2, log_std_min=-20, limit_std=1):
@@ -533,6 +602,7 @@ class ActorCritic0(nn.Module):
     
     def get_similarity(self, x, y):
         d = F.cosine_similarity(x, y)
+        #~ d = my.rbf_similarity(x, y, scale=10.0)
         return d
     
     def get_layer_rotation(self):
@@ -540,6 +610,8 @@ class ActorCritic0(nn.Module):
         for n, p, p0 in zip(self.register_layer, self.register_w, self.initial_w):
             d = F.cosine_similarity(p.detach().view(1,-1), p0.view(1,-1))
             ds[n+'_cos'] = 1.0-d.item()
+            #~ d = my.rbf_similarity(p.detach().view(1,-1), p0.view(1,-1), scale=5)
+            #~ ds[n+'_rbf'] = 1.0-d.item()
         return ds
     
     def compute_layer_rotation_loss(self):
@@ -621,7 +693,6 @@ class ActorCritic0(nn.Module):
             log_prob = normal.log_prob(actions)
             return log_prob
 
-
 def compute_returns(next_value, rewards, masks, gamma=0.99):
     R = next_value
     returns = []
@@ -629,7 +700,6 @@ def compute_returns(next_value, rewards, masks, gamma=0.99):
         R = rewards[step] + gamma * R * masks[step]
         returns.insert(0, R)
     return returns
-
 
 def feed_forward_generator(obs_next, obs, actions, num_inputs, output_size, mini_batch_size=64):
     obs_next = torch.cat(obs_next)#.view(-1, num_inputs)
@@ -646,9 +716,32 @@ def feed_forward_generator(obs_next, obs, actions, num_inputs, output_size, mini
         actions_batch = actions[indices]
         yield obs_batch, actions_batch, obs_next_batch
 
+def feed_forward_generator_ppo(ppo_z, obs, actions, returns, log_probs, advantage, mini_batch_size=64):
+    ppo_z = torch.cat(ppo_z)
+    obs = torch.cat(obs)
+    actions = torch.cat(actions)
+    batch_length = obs.shape[0]
+    sampler = BatchSampler(
+        SubsetRandomSampler(range(batch_length)),
+        mini_batch_size,
+        drop_last=True)
+    for indices in sampler:
+        z_batch = ppo_z[indices]
+        obs_batch = obs[indices]
+        actions_batch = actions[indices]
+        returns_batch = returns[indices]
+        log_probs_batch = log_probs[indices]
+        advantage_batch = advantage[indices]
+        yield z_batch, obs_batch, actions_batch, returns_batch, log_probs_batch, advantage_batch
+
+def replay_ppo(obs, actions, returns, log_probs, values, ppo_z, ppo_mask_w):
+    for i in range(len(obs)):
+        yield i, obs[i], actions[i], returns[i], log_probs[i], returns[i]-values[i], ppo_z[i], ppo_mask_w[i]
+
 
 def main():
     writer = SummaryWriter(os.path.join("logs", 'runs'))
+    #~ tsbx_id = time.strftime('%Y%m%d_%H%M%S_', time.localtime())
     tsbx_id = time.strftime('%H%M%S_', time.localtime())
     norm_obs = False
     norm_ret = False
@@ -662,15 +755,19 @@ def main():
     log_grads = 1
     log_interval = 10
     
-    #~ num_envs = 48
+    #~ num_envs = 32
     num_envs = 24
     #~ num_envs = 20
     #~ num_envs = 16
     #~ num_envs = 2
     #~ num_envs = 1
     num_steps   = 5
+    #~ num_steps   = 7
+    #~ num_steps   = 8
     #~ num_steps   = 10
+    #~ num_steps   = 20
     num_steps   = 50
+    #~ num_steps   = 10000
     
     ep_valid = 1000
     #~ ep_valid = 500
@@ -681,10 +778,14 @@ def main():
     ep_max = 100        # train normal
     #~ ep_max = 120        # train
     ep_max = 144        # train traj
-    ep_max = 480        # train traj
+    #~ ep_max = 192        # train traj
+    #~ ep_max = 288        # train traj
+    #~ ep_max = 480        # train traj
     
     moo_mode = 0
     #~ moo_mode = 1
+    
+    moo_mode = 1 if args.moo_mode else moo_mode
     
     env_name = "MOO"
     
@@ -700,25 +801,31 @@ def main():
     #~ SEED = 168442
     #~ SEED = 308086
     
-    #~ SEED = 42
-    #~ SEED = 275
-    #~ SEED = 5092
-    #~ SEED = 486200
-    #~ SEED = 55444709
+    SEED = args.seed if args.seed else SEED
     
-    save_interval = 50
-    save_interval = 100
-    #~ save_interval = 200
+    #~ save_interval = 50
+    #~ save_interval = 100
     save_interval = 500
-    #~ save_interval = 1e6
     trained_model = None
-    trained_model = "trained_models/20210204_231637_case1/EP_6000_-1_0.pt"   # case1 best
+    trained_model = "trained_models/_obs_rms_only/EP_6000_-1_0.pt"
+    #~ trained_model = "trained_models/20220207_030259/EP_6000_-14_0.pt"
+    
+    trained_model = args.trained_model if args.trained_model else trained_model
     
     ob_rms_only = True
-    #~ ob_rms_only = False
+    ob_rms_only = False
+    
+    ob_rms_only = args.load_ob_rms_only if args.load_ob_rms_only else ob_rms_only
+    if ob_rms_only and trained_model:
+        print(f'Load ob_rms_only')
+    elif not ob_rms_only:
+        print(f'trained_model: {trained_model}')
     
     finetune_mode = 0
-    finetune_mode = 1       # freeze obs_norm
+    finetune_mode = 1       # freeze obs_normalize
+    
+    finetune_mode = args.freeze_obs_norm if args.freeze_obs_norm else finetune_mode
+    if finetune_mode: print('freeze_obs_norm')
     
     valid_mode = 0
     #~ valid_mode = 2               # by hand
@@ -763,13 +870,16 @@ def main():
     #~ rnn_enc_lr = 1e-4
     
     use_gail = 0
-    #~ use_gail = 1
-    #~ use_gail = 2            # real traj mode
+    # use_gail = 1
+    use_gail = 2            # real traj mode
     use_gail = 3            # simple traj mode
     #~ use_gail = 4        # rnn encoder mode
     #~ use_gail = 5        # triplet_loss
     #~ use_gail = 6        # rnd
-    #~ use_gail = 7        # energy traj
+    use_gail = 7        # energy traj, work nice
+    
+    use_gail = args.use_gail if args.use_gail else use_gail
+    if use_gail: print(f'gail mode: {use_gail}')
     
     gail_moo_hack = 0       # replace sec
     #~ gail_moo_hack = 1       # replace tp
@@ -790,11 +900,8 @@ def main():
     
     gail_lr = 1e-3
     gail_lr = 5e-4
-    #~ gail_lr = 1e-4
-    #~ gail_lr = 3e-4
     
     gail_ep = 5
-    #~ gail_ep = 10
     gail_warmup = 100
     gail_batch_size = 64
     #~ gail_batch_size = 72    # SingleTimestepIRL # energy
@@ -808,15 +915,20 @@ def main():
     gail_traj_num = 50
     gail_traj_len = 5
     gail_traj_freq = 1
-    gail_experts_trajs, gail_traj_num = "expert_trajectories_500.pt", 500
+    gail_experts_trajs, gail_traj_num = "expert_trajectories_500.pt", 500      # left top, sec min, tp max hack 0,, ---OK
     
     gail_model = None
-    #~ gail_model = "trained_models/20210928_072012/EP_2500_-8_0_d.pt"
+    #~ gail_model = "trained_models/20220207_030259/EP_6000_-14_0_d.pt"
+    
+    gail_model = args.gail_model if args.gail_model else gail_model
+    if gail_model: print(f'gail_model: {gail_model}')
     
     gail_model2 = None
+    #~ gail_model = "trained_models/20220206_120202/EP_1700_-8_0_d.pt"
     
-    rnd_model = None
-    
+    rnd_model = 'rnd_case1_full.pt'
+    #~ rnd_model = 'rnd_case1_sec.pt'
+
     GM = 1
     #~ GM = 0
     
@@ -843,9 +955,21 @@ def main():
     
     use_kfac = 1
     #~ use_kfac = 0
+
+    use_ppo = 0
+    use_ppo = 1     # use ppo replay buffer
+
+    ppo_epoch = 5
+    # ppo_epoch = 8
+    # ppo_epoch = 10
+    ppo_batch_size = 48
+    ppo_clip_param = 0.2
     
-    use_critic = 1
     #~ use_critic = 0
+    use_critic = 1
+    #~ use_critic = 2
+    
+    use_critic = args.use_critic if args.use_critic else use_critic
     
     rand_orth_reg = 0
     #~ rand_orth_reg = 1            # train
@@ -853,18 +977,20 @@ def main():
     
     rand_orth_reg = rand_orth_reg if GM else 0
     
+    coeff_orth = 1.0
     coeff_orth = 0.1        # ok
     
     param_noise = None
+    #~ param_noise = 0.01       # ok
     
     limit_std = 1.5         # Pendulum-v0
+    #~ limit_std = 1
     limit_std = 0.1         # ok
     
     LOG_SIG_MAX = 2
     LOG_SIG_MIN = -20
     
     coef_rotation_loss = 0.1
-    #~ coef_rotation_loss = 0.5
     
     use_layer_rotation = 0
     #~ use_layer_rotation = 1
@@ -879,14 +1005,30 @@ def main():
     num_scheduler_lr = 1000     # Pendulum
     max_lr = 4e-3
     
+    #~ lr          = 1e-2
+    #~ lr          = 4e-3
+    #~ lr          = 1e-3
+    lr          = 7e-4
     lr          = 5e-4
+    # lr          = 3e-4
+    #~ lr          = 2.5e-4
+    #~ lr          = 2e-4
+    # lr          = 1e-4
+    #~ lr          = 3e-4
     
     max_grad = 0.5
+    #~ max_grad = 5
     
+    #~ betas=(0.9, 0.999)
+    betas = 0.5, 0.999      # rms
+    #~ betas = 0.5, 0.95
     betas = 0.0, 0.9         # kfac
     
     gamma = 0.99
+    #~ coef_value = 0.25
     coef_value = 0.5
+    #~ coef_value = 0.75
+    #~ coef_value = 0.9
     
     coef_entropy = 2
     #~ coef_entropy = None
@@ -900,11 +1042,14 @@ def main():
         envs = [make_env(env_name, SEED, i, env_args={'debug':render_env}) for i in range(num_envs)]
     else:
         envs = [make_env_gym(env_name, SEED, i) for i in range(num_envs)]
+    #~ envs = [make_env(env_name, 0, i, None,False,False) for i in range(num_envs)]
     envs = SubprocVecEnv(envs, render=render_env) # 8 env
     
     envs = VecMonitor(envs)
     envs = VecNormalize(envs, ob=norm_obs, ret=norm_ret, gamma=gamma)
 
+    #~ env_test = gym.make(env_name) # a single env
+    
     num_inputs  = envs.observation_space.shape[0]
     action_space = envs.action_space
     if action_space.__class__.__name__ == "Discrete":
@@ -941,6 +1086,7 @@ def main():
             rnn_encoder = gail.RnnEncoder(num_inputs, output_size, rnn_enc_size, lr=rnn_enc_lr).to(device)
         
         if use_gail==6:
+            #~ gail_shape = num_inputs, output_size
             gail_shape = num_inputs*gail_traj_len, output_size*gail_traj_len
             discr = gail.RND_Critic(*gail_shape, device)
             discr.load(os.path.join(gail_experts_dir, rnd_model))
@@ -992,12 +1138,41 @@ def main():
     if use_kfac:
         tsbx_id += 'kfac_'
         preconditioner = EKFAC(model, 0.1, ra=True, update_freq=kfac_freq)
+        #~ preconditioner = EKFAC(model, 0.1, ra=True, update_freq=50)
+        #~ preconditioner = EKFAC(model, 0.1, sua=True, update_freq=kfac_freq, alpha=1)
+        #~ optimizer = optim.RMSprop(model.parameters(), lr=lr, eps=1e-5, alpha=0.99)
         optimizer = optim.Adam(model.parameters(), lr=lr, betas=betas)
-
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr, betas=betas, weight_decay=1e-5)   # ok
+        #~ optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, weight_decay=1e-5)   # ok
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr)
+        #~ optimizer = optim.SGD(model.parameters(), lr=lr, weight_decay=1e-3)
+        #~ optimizer = optim.SGD(model.parameters(), lr=lr)
+    elif use_ppo:
+        tsbx_id += 'ppo_'
+        # optimizer = optim.Adam(model.parameters(), lr=lr, betas=betas)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
     else:
         optimizer = optim.RMSprop(model.parameters(), lr=lr)
+        #~ optimizer = torch.optim.RMSprop(model.parameters(), lr=lr, weight_decay=1e-5)   # ok
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)   # ok
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr, betas=betas, weight_decay=1e-5)   # ok
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr, betas=betas)
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr)
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr, eps=1e-5)
+        #~ optimizer = optim.RMSprop(model.parameters(), lr=lr, eps=1e-5, alpha=0.99)
+        #~ optimizer = adabound.AdaBound(model.parameters(), lr=lr, eps=1e-5, final_lr=0.1)
+        #~ optimizer = adabound.AdaBound(model.parameters(), lr=lr, betas=betas, eps=1e-5, final_lr=0.1)
+        #~ optimizer = adabound.AdaBound(model.parameters(), lr=lr, betas=betas, final_lr=0.1)
+        #~ optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+        #~ optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=1e-3)
     
-    if opt_state is not None:
+    #~ if use_layer_rotation in (1,3):
+        #~ optimizer = optim.Adam(model.layer_rotation_parameters(), lr=lr, betas=betas)
+        #~ layer_rotation_groups = [p for p in optimizer.param_groups if 'layer_rotation' in p]
+    #~ else:
+        #~ optimizer = optim.Adam(model.parameters(), lr=lr, betas=betas)
+    
+    if opt_state is not None and use_critic==1:
         optimizer.load_state_dict(opt_state)
 
     if use_scheduler_lr==2:
@@ -1010,6 +1185,8 @@ def main():
     frame_idx    = 0
     test_rewards = []
     
+    #~ episode_rewards = torch.zeros([num_envs, 1]).to(device)
+    #~ final_rewards = torch.zeros([num_envs, 1]).to(device)
     episode_rewards = deque(maxlen=num_envs)
 
     best_z = SortedDict()
@@ -1032,6 +1209,9 @@ def main():
         rewards   = []
         masks     = []
         loss_reg = []
+
+        ppo_z = []
+        ppo_mask_w = []
         
         moo_pop = []
         moo_z = []
@@ -1048,6 +1228,8 @@ def main():
         
         gail_moo_map = {}
         gail_moo_pop = []
+        gail_pop_idx = []
+        gail_pop_cd = []
         
         nan_check = 0
         
@@ -1061,18 +1243,31 @@ def main():
         # generation end
         # rollout trajectory
         state = envs.reset()
+        #~ for steps in range(num_steps):
         for steps in count(0):
             state = torch.FloatTensor(state).to(device)
             
             # generation begin
+            if use_ppo: ppo_mask_w.append(mask_w.clone() if mask_w is not None else None)
             if mask_w is not None:
                 z = model.generate_ep(valid_z=valid_z if valid_mode else None, mask=mask_w)
                 if rand_orth_reg:
                     lossReg = model.actor.random_proj_reg(num_envs, perm=1)
                     loss_reg.append(lossReg)
+            if use_ppo: ppo_z.append(model.z_clone())
             # generation end
             
-            action, log_prob, dist_entropy, value = model.sample(state, deterministic=valid_mode, 
+            if use_ppo:
+                if use_critic==1:
+                    action, log_prob, dist_entropy, value = model.sample(state, deterministic=valid_mode, 
+                                                                    limit_std=(coef_entropy if use_entropy_decay else None),
+                                                                    )
+                elif use_critic==2:
+                    action, log_prob, dist_entropy, value = model.sample_ppo2(state, deterministic=valid_mode, 
+                                                                    limit_std=(coef_entropy if use_entropy_decay else None),
+                                                                    )
+            else:
+                action, log_prob, dist_entropy, value = model.sample(state, deterministic=valid_mode, 
                                                                     limit_std=(coef_entropy if use_entropy_decay else None),
                                                                     )
             
@@ -1114,6 +1309,7 @@ def main():
                     hv_reward_idx.append(steps*num_envs + i)
                     gail_moo_map[steps*num_envs + i] = len(gail_moo_pop)
                     gail_moo_pop.append(info['mobj'].copy())
+                    gail_pop_idx.append(len(ep_start_idx)-1)
                 if 'mobj_ill' in info.keys():
                     ep_in_bounds[last_ep_key] = False
                 if 'ref_p' in info.keys():
@@ -1129,7 +1325,7 @@ def main():
             values.append(value)
             rewards.append(reward)
             masks.append(mask)
-            if use_gail or valid_mode==2:
+            if use_ppo or use_gail or valid_mode==2:
                 obs_next.append(torch.FloatTensor(next_state).to(device))
                 obs.append(state.clone())
                 actions.append(action.clone())
@@ -1137,7 +1333,7 @@ def main():
             state = next_state
             frame_idx += 1
             
-            ep_counts += np.sum(done.astype(np.bool))
+            ep_counts += np.sum(done.astype(bool))
             if ep_counts>=(ep_valid if valid_mode else ep_max):
                 break
         
@@ -1357,6 +1553,7 @@ def main():
             elif use_gail==20:
                 gail_rws_ep = []
                 gail_rewards = torch.zeros(num_envs, steps+1)
+                #~ gail_rewards = torch.full((num_envs, steps+1), -1.0)
                 rollouts_pred = torch.utils.data.DataLoader(
                                     dataset=rollout_dataset,
                                     batch_size=1,
@@ -1375,6 +1572,7 @@ def main():
             elif use_gail==7:
                 gail_rws_ep = []
                 gail_rewards = torch.zeros(num_envs, steps+1)
+                #~ gail_rewards = torch.full((num_envs, steps+1), -1.0)
                 rollouts_pred = torch.utils.data.DataLoader(
                                     dataset=rollout_dataset,
                                     batch_size=1,
@@ -1402,6 +1600,7 @@ def main():
             elif use_gail==6:
                 gail_rws_ep = []
                 gail_rewards = torch.zeros(num_envs, steps+1)
+                #~ gail_rewards = torch.full((num_envs, steps+1), -1.0)
                 rollouts_pred = torch.utils.data.DataLoader(
                                     dataset=rollout_dataset,
                                     batch_size=1,
@@ -1451,11 +1650,22 @@ def main():
                 hv_scale = 1e-2
             hv_c = hv.contributions(ref_p)
             hv_s = hv.compute(ref_p)
+            # hack reward begin
             rewards = torch.stack(rewards)
             ndf_ = (torch.FloatTensor(hv_c)>0)
             hv_ = ndf_.float() * hv_s * hv_scale    # 1e-2
             rewards.view(-1, 1)[hv_reward_idx] += hv_.unsqueeze(1).to(device)
             # hack reward end
+            # crowding_distance begin
+            states_cd = torch.ones(num_envs, steps+1)
+            pop_cd = pg.crowding_distance(gail_moo_pop)
+            pop_cd = np.nan_to_num(pop_cd, posinf=1, neginf=1)
+            for cd, pop_idx in zip(pop_cd, gail_pop_idx):
+                traj_idx = ep_start_idx[pop_idx]
+                traj_i, traj_start, traj_steps = traj_idx
+                states_cd[traj_i, traj_start:traj_start+traj_steps] = cd
+            gail_pop_cd = states_cd.chunk(steps+1, dim=1)
+            # crowding_distance end
             if train_valid and valid_mode:
                 writer.add_scalar(tsbx_id+'_mo/hv_valid', hv_s, j-1)
                 writer.add_scalars(tsbx_id+'_mo/ihv_valid', {'mean':np.mean(hv_c), 
@@ -1556,81 +1766,121 @@ def main():
         
         t_optm = time.time()
         # V Begin
-        if use_critic:
+        if use_critic==1:
             next_state = torch.FloatTensor(next_state).to(device)
             with torch.no_grad():
                 next_value = model.value(next_state)
-        else:
-            next_value = 0
-        returns = compute_returns(next_value, rewards, masks)
-        
-        log_probs = torch.cat(log_probs)
-        returns   = torch.cat(returns).detach()
-        entropys = torch.cat(entropys)
-        entropy = entropys.mean()
-        
-        optimizer.zero_grad()
-        
-        if use_critic:
+            returns = compute_returns(next_value, rewards, masks)
+            
+            log_probs = torch.cat(log_probs)
+            returns   = torch.cat(returns).detach()
+            entropys = torch.cat(entropys)
+            entropy = entropys.mean()
+            
+            optimizer.zero_grad()
+            
             values    = torch.cat(values)
             advantage = returns - values
             actor_loss  = -(log_probs * advantage.detach()).mean()
-            critic_loss = advantage.pow(2).mean()
-            loss = actor_loss + coef_value * critic_loss
-        else:
-            advantage = returns
+            critic_loss = coef_value * advantage.pow(2).mean()
+            loss = actor_loss + critic_loss
+            
+            if rand_orth_reg:
+                loss_orth = torch.stack(loss_reg).mean()
+            if rand_orth_reg==1:
+                loss +=  loss_orth * coeff_orth
+            
+            if use_gail and policy_grad_pen:
+                loss += discr.policy_grad_pen(gail_train_loader, rollouts, model, num_inputs, output_size)
+            
+            loss.backward()
+            # check grads begin
+            if j%25==0 and log_grads:
+                for name, param in model.named_parameters():
+                    name = name.split('.')
+                    name = '.'.join(name[:1]) + '/' + '.'.join(name[1:])
+                    writer.add_histogram(tsbx_id+'model.%s'%name, param.data.detach().cpu().numpy(), j)
+                    writer.add_histogram(tsbx_id+'model.%s.grads'%name, param.grad.detach().cpu().numpy(), j)
+            if use_kfac:
+                preconditioner.step()
+            nn.utils.clip_grad_norm_(model.parameters(), max_grad)
+            # check grads end
+            optimizer.step()
+            # debug begin
+            t_optm = time.time() - t_optm
+            print(f"optm time: {t_optm*1000:.0f} ms")
+            t_log = time.time()
+            # debug end
+        
+        if use_critic==2:
+            actor_loss = torch.tensor(0.0)
+            critic_loss = torch.tensor(0.0)
+            num_updates = 0
+            
+            next_value = 0
+            returns = compute_returns(next_value, rewards, masks)
+
+            #~ log_probs2 = torch.cat(log_probs)
+            #~ returns2   = torch.cat(returns).detach()
+            #~ values2    = torch.cat(values)
+            #~ advantage2 = returns2 - values2
+
+            entropys = torch.cat(entropys)
+            entropy = entropys.mean()
+            
+            def replay_iter():
+                log_probs_list = []
+                values_list = []
+                model.generate_ppo(ppo_z[0])
+                for sample in replay_ppo(obs, actions, returns, log_probs, values, ppo_z, ppo_mask_w):
+                    idx, obs_batch, actions_batch, returns_batch, log_probs_old, adv_targ, replay_z, replay_mask_w = sample
+                    if replay_mask_w is not None:
+                        model.generate_ep_ppo(replay_z, replay_mask_w)
+                    
+                    cd_batch = torch.FloatTensor(gail_pop_cd[idx]).to(device)
+                    log_probs_batch, values_batch = model.eval_ppo2_cd(obs_batch, actions_batch, replay_z, cd_batch)
+                    
+                    log_probs_list.append(log_probs_batch)
+                    values_list.append(values_batch)
+                return log_probs_list, values_list
+            
+            log_probs_list, values_list = replay_iter()
+            
+            log_probs = torch.cat(log_probs_list)
+            values = torch.cat(values_list)
+            returns   = torch.cat(returns).detach()
+            
+            advantage = returns - values
             actor_loss  = -(log_probs * advantage.detach()).mean()
-            critic_loss = torch.tensor(0)
-            loss = actor_loss
-        
-        if rand_orth_reg:
-            loss_orth = torch.stack(loss_reg).mean()
-        if rand_orth_reg==1:
-            loss +=  loss_orth * coeff_orth
-        
-        if use_gail and policy_grad_pen:
-            loss += discr.policy_grad_pen(gail_train_loader, rollouts, model, num_inputs, output_size)
-        
-        loss.backward()
-        # check grads begin
-        if j%25==0 and log_grads:
-            for name, param in model.named_parameters():
-                name = name.split('.')
-                name = '.'.join(name[:1]) + '/' + '.'.join(name[1:])
-                writer.add_histogram(tsbx_id+'model.%s'%name, param.data.detach().cpu().numpy(), j)
-                writer.add_histogram(tsbx_id+'model.%s.grads'%name, param.grad.detach().cpu().numpy(), j)
-        if use_kfac:
-            preconditioner.step()
-        nn.utils.clip_grad_norm_(model.parameters(), max_grad)
-        # check grads end
-        optimizer.step()
-        # debug begin
-        t_optm = time.time() - t_optm
-        print(f"optm time: {t_optm*1000:.0f} ms")
-        t_log = time.time()
-        #~ if hasattr(model, 'reset'):
-            #~ model.reset()
-        # debug end
-        
-        # layer_rotation begin
-        if use_layer_rotation in (1,3):
-            model.set_layer_rotation_lr(layer_rotation_groups, lr)
-        # layer_rotation end
-        # schedule lr begin
-        if use_scheduler_lr:
-            if use_scheduler_lr==1:
-                update_linear_schedule(optimizer, j, num_updates, lr)
-            elif use_scheduler_lr==2:
-                scheduler_lr.step()
-            if j>=num_scheduler_lr:
-                set_lr(optimizer, lr)
-                use_scheduler_lr = 0
-        if use_entropy_decay:
-            coef_entropy = update_entropy_schedule(j, use_entropy_decay, initial_entropy, min_entropy)
-        # schedule lr end
-        
+            critic_loss = coef_value * advantage.pow(2).mean()
+            loss = actor_loss + critic_loss
+            
+            if rand_orth_reg:
+                loss_orth = torch.stack(loss_reg).mean()
+            
+            loss.backward()
+            # check grads begin
+            if j%25==0 and log_grads:
+                for name, param in model.named_parameters():
+                    name = name.split('.')
+                    #~ name = '.'.join(name[:-1]) + '/' + name[-1]
+                    name = '.'.join(name[:1]) + '/' + '.'.join(name[1:])
+                    writer.add_histogram(tsbx_id+'model.%s'%name, param.data.detach().cpu().numpy(), j)
+                    writer.add_histogram(tsbx_id+'model.%s.grads'%name, param.grad.detach().cpu().numpy(), j)
+            if use_kfac:
+                preconditioner.step()
+            nn.utils.clip_grad_norm_(model.parameters(), max_grad)
+            # check grads end
+            optimizer.step()
+            # debug begin
+            t_optm = time.time() - t_optm
+            print(f"optm time: {t_optm*1000:.0f} ms")
+            t_log = time.time()
+            # debug end
+
         total_num_steps = (j + 1) * num_envs * num_steps
         
+        #~ if j%save_interval==0 and j>0:
         if (j<100 and j%2==0) \
                 or ((100<=j<=600 or 1000<=j<=1200 or 1500<=j<=1700 or 2000<=j<=2200) and j%5==0) \
                 or j%save_interval==0:
@@ -1666,7 +1916,7 @@ def main():
             writer.add_scalars(tsbx_id+'_train/lr', get_lr_layer_rotation(optimizer), j)
         if j%10==0 and hasattr(model, 'get_layer_rotation'):
             writer.add_scalars(tsbx_id+'_train/layer_rotation', model.get_layer_rotation(), j)
-        
+
         t_log = time.time() - t_log
         if nan_check:
             break
