@@ -5,13 +5,13 @@
 ### Pretrain
 
 ```
-python main_a2c_ppo.py --load-ob-rms-only --use-gail 7 --use-critic 1
+python main.py --load-ob-rms-only --use-gail 7 --use-critic 1
 ```
 
 ### Finetune
 
 ```
-python main_a2c_ppo.py --moo-mode --use-gail 7 --use-critic 2 --trained-model "trained_models/20220212_122358/EP_4500_-5_0.pt" --gail-model  "trained_models/20220212_122358/EP_4500_-5_0_d.pt"
+python main.py --moo-mode --use-gail 7 --use-critic 2 --trained-model "trained_models/20220213_012544/EP_4000_-12_0.pt" --gail-model  "trained_models/20220213_012544/EP_4000_-12_0_d.pt"
 ```
 
 ## Tensorboard
